@@ -105,9 +105,20 @@ const controls=new THREE.OrbitControls(camera, canvas);
 controls.enableDamping=true;
 controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN };
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-const dl=new THREE.DirectionalLight(0xffffff, 1);
-dl.position.set(10, 20, 10); scene.add(dl);
+/* ===== BALANCED CAD LIGHTING RIG ===== */
+// 1. Moderate Ambient Light: Gives a highly visible base illumination to shaded areas.
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.45);
+scene.add(ambientLight);
+
+// 2. High-contrast Key Light: Placed at an angle to define vertical and horizontal plane transitions.
+const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.65);
+dirLight1.position.set(300, 400, 150);
+scene.add(dirLight1);
+
+// 3. Subtle Fill Light: Fills the shadowed side of the model just enough to see edges and detail clearly.
+const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.25);
+dirLight2.position.set(-300, 200, -150);
+scene.add(dirLight2);
 
 // ORIGIN AXES AND GRID
 scene.add(new THREE.GridHelper(500, 50));
@@ -347,7 +358,15 @@ function processIFC(buffer, fileName) {
             const p = pg.get(i);
             const g = ifc.GetGeometry(activeModelID, p.geometryExpressID);
             const geom = new THREE.BufferGeometry();
-            geom.setAttribute("position", new THREE.InterleavedBufferAttribute(new THREE.InterleavedBuffer(ifc.GetVertexArray(g.GetVertexData(), g.GetVertexDataSize()), 6), 3, 0));
+            
+            // Build the Interleaved Buffer holding coordinates
+            const vertexData = ifc.GetVertexArray(g.GetVertexData(), g.GetVertexDataSize());
+            const interleavedBuffer = new THREE.InterleavedBuffer(vertexData, 6);
+            
+            // Map both position [0,1,2] and normal [3,4,5] coordinates correctly!
+            geom.setAttribute("position", new THREE.InterleavedBufferAttribute(interleavedBuffer, 3, 0));
+            geom.setAttribute("normal", new THREE.InterleavedBufferAttribute(interleavedBuffer, 3, 3));
+            
             geom.setIndex(new THREE.BufferAttribute(ifc.GetIndexArray(g.GetIndexData(), g.GetIndexDataSize()), 1));
             
             // Core mesh setup
@@ -358,7 +377,7 @@ function processIFC(buffer, fileName) {
             mesh.matrix.fromArray(p.flatTransformation); mesh.matrixAutoUpdate = false;
             mesh.userData.expressID = flat.expressID;
             
-            // --- EDGE OUTLINES (ITEM 1) ---
+            // --- EDGE OUTLINES ---
             const edgesGeo = new THREE.EdgesGeometry(geom, 1); // 1 degree threshold for crisp angles
             const edgesMat = new THREE.LineBasicMaterial({ color: 0x333333, linewidth: 1 });
             const edgeLines = new THREE.LineSegments(edgesGeo, edgesMat);
