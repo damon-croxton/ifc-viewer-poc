@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>IFC Viewer PoC – Local Native</title>
+<style>
+body{margin:0;font-family:system-ui;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#status{padding:6px 10px;background:#eee;border-bottom:1px solid #ccc;font-weight:bold}
+#mainContainer{flex:1;display:flex;overflow:hidden}
+#viewer{flex:1;background:#1e1e1e;touch-action:none}
+#sidebar{width:320px;background:#f9f9f9;border-left:1px solid #ccc;display:flex;flex-direction:column;font-size:13px}
+.panel-header{background:#ddd;padding:8px;font-weight:bold;border-bottom:1px solid #ccc;display:flex;justify-content:space-between}
+.panel-content{flex:1;overflow:auto;padding:5px}
+.prop-row{display:flex;border-bottom:1px solid #eee;padding:4px 0}
+.prop-key{font-weight:bold;width:40%;color:#555}
+.prop-val{width:60%;word-break:break-all}
+.sel-item{display:flex;justify-content:space-between;background:#fff;margin-bottom:2px;padding:4px;border:1px solid #eee}
+.btn-del{cursor:pointer;color:red;font-weight:bold;padding:0 5px}
+#bottomPanel{border-top:1px solid #ccc;background:#f5f5f5}
+#viewButtons{display:flex;gap:2%;padding:6px;border-bottom:1px solid #ccc}
+.vbtn{flex:1;padding:8px;text-align:center;background:#ddd;border:1px solid #aaa;font-weight:bold;cursor:pointer}
+#qtyTable{display:flex;font-size:13px;padding:4px 6px;border-bottom:1px solid #ccc}
+#qtyTable div{flex:1;text-align:center;border-right:1px solid #ccc}
+#qtyTable div:last-child{border-right:none}
+#log{height:20vh;background:#111;color:#0f0;font:12px Consolas,monospace;overflow:auto;padding:6px;white-space:pre}
+.selectBox { border: 2px solid #3399ff; background-color: rgba(51, 153, 255, 0.3); position: fixed; pointer-events: none; z-index: 1000; }
+.action-bar{padding:5px; display:flex; gap:5px; background:#eee; border-bottom:1px solid #ccc}
+.btn-action{flex:1; padding:5px; cursor:pointer; font-size:11px; font-weight:bold}
+</style>
+</head>
+<body>
+
+<div id="status">Booting…</div>
+<div style="padding:6px; background:#eee; display:flex; gap:10px;">
+    <input type="file" id="file" accept=".ifc">
+    <button onclick="clearSelection()">Clear Selection</button>
+</div>
+
+<div id="mainContainer">
+    <canvas id="viewer"></canvas>
+    <div id="sidebar">
+        <!-- Selection Pane -->
+        <div style="height:35%; display:flex; flex-direction:column; border-bottom:2px solid #ccc">
+            <div class="panel-header">Selection (<span id="selCount">0</span>)</div>
+            <div class="action-bar">
+                <button class="btn-action" onclick="hideSelected()">Hide Selected</button>
+                <button class="btn-action" onclick="showAll()">Show All</button>
+            </div>
+            <div id="selectionPane" class="panel-content"></div>
+        </div>
+        <!-- Properties Pane -->
+        <div style="height:65%; display:flex; flex-direction:column">
+            <div class="panel-header">Properties</div>
+            <div id="propertiesPane" class="panel-content">Select an object...</div>
+        </div>
+    </div>
+</div>
+
+<div id="bottomPanel">
+  <div id="viewButtons">
+    <div class="vbtn" id="vp0">Origin</div>
+    <div class="vbtn" id="vp1">Extents</div>
+    <div class="vbtn" id="vp2">IFC Only</div>
+  </div>
+  <div id="qtyTable">
+    <div>Proxy: <span id="qProxy">–</span></div>
+    <div>Slab: <span id="qSlab">–</span></div>
+    <div>Column: <span id="qColumn">–</span></div>
+    <div>Beam: <span id="qBeam">–</span></div>
+    <div>Other: <span id="qOther">–</span></div>
+  </div>
+  <div id="log"></div>
+</div>
+
+<!-- NATIVE LOCAL REPO LINKS -->
+<script src="./three.min.js"></script>
+<script src="./OrbitControls.js"></script>
+<script src="./web-ifc-api-iife.js"></script>
+
+<script>
+const logEl=document.getElementById("log");
+function log(msg){
+  const t = new Date().toLocaleTimeString('en-GB', { hour12: false }) + '.' + new Date().getMilliseconds().toString().padStart(3, '0');
+  logEl.textContent+=`[${t}] ${msg}\n`;
+  logEl.scrollTop=logEl.scrollHeight;
+}
+
+/* ===== THREE SETUP ===== */
+const canvas=document.getElementById("viewer");
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x1e1e1e);
+const camera=new THREE.PerspectiveCamera(60, canvas.clientWidth/canvas.clientHeight, 0.1, 1e7);
+const renderer=new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+const controls=new THREE.OrbitControls(camera, canvas);
+controls.enableDamping=true;
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN };
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dl=new THREE.DirectionalLight(0xffffff, 1);
+dl.position.set(10, 20, 10); scene.add(dl);
+
+// ORIGIN AXES AND GRID
+scene.add(new THREE.GridHelper(500, 50));
+const axesHelper = new THREE.AxesHelper(100);
+scene.add(axesHelper);
+
+camera.position.set(100, 100, 100);
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+/* ===== SELECTION & VISIBILITY ===== */
+let pickableObjects = [];
+const selectedItems = new Map(); 
+const highlightColor = new THREE.Color(0x3399ff);
+let activeModelID = -1;
+
+function clearSelection() {
+    selectedItems.forEach(item => item.mesh.material.color.copy(item.originalColor));
+    selectedItems.clear();
+    updateSelectionUI();
+    fetchIFCProperties();
+}
+
+function hideSelected() {
+    if (selectedItems.size === 0) return;
+    log(`VIS: Hiding ${selectedItems.size} items.`);
+    selectedItems.forEach(item => {
+        item.mesh.visible = false;
+        item.mesh.material.color.copy(item.originalColor);
+    });
+    selectedItems.clear();
+    updateSelectionUI();
+    fetchIFCProperties();
+}
+
+function showAll() {
+    log("VIS: Showing all items.");
+    pickableObjects.forEach(m => m.visible = true);
+}
+
+function addToSelectionList(mesh) {
+    if (!mesh.visible) return false;
+    const id = mesh.userData.expressID;
+    if (!selectedItems.has(id)) {
+        selectedItems.set(id, { mesh, originalColor: mesh.material.color.clone() });
+        mesh.material.color.copy(highlightColor);
+        return true;
+    }
+    return false;
+}
+
+function updateSelectionUI() {
+    const pane = document.getElementById("selectionPane");
+    document.getElementById("selCount").textContent = selectedItems.size;
+    pane.innerHTML = "";
+    let count = 0;
+    for (let [id, val] of selectedItems) {
+        if (count > 50) { pane.innerHTML += `<div style="text-align:center; padding:5px;">...and ${selectedItems.size - 50} more</div>`; break; }
+        const div = document.createElement("div");
+        div.className = "sel-item";
+        div.innerHTML = `<span>ID: ${id}</span><span class="btn-del" onclick="removeSingleSelection(${id})">×</span>`;
+        pane.appendChild(div);
+        count++;
+    }
+}
+
+function removeSingleSelection(id) {
+    const item = selectedItems.get(id);
+    if(item) {
+        item.mesh.material.color.copy(item.originalColor);
+        selectedItems.delete(id);
+        updateSelectionUI();
+        fetchIFCProperties();
+    }
+}
+
+/* ===== PROPERTIES MERGE ===== */
+async function fetchIFCProperties() {
+    if(activeModelID === -1 || selectedItems.size === 0) {
+        document.getElementById("propertiesPane").innerHTML = selectedItems.size === 0 ? "Select an object..." : "";
+        return;
+    }
+
+    const ids = Array.from(selectedItems.keys());
+    const totalSelected = ids.length;
+    
+    const sampleSize = totalSelected > 20 ? 20 : totalSelected;
+    const step = Math.max(1, Math.floor(totalSelected / sampleSize));
+    const sampleIds = [];
+    for(let i=0; i < totalSelected; i += step) if(sampleIds.length < sampleSize) sampleIds.push(ids[i]);
+
+    try {
+        const sampleData = sampleIds.map(id => ifc.GetLine(activeModelID, id, true));
+        const allKeys = new Set();
+        sampleData.forEach(obj => Object.keys(obj).forEach(k => allKeys.add(k)));
+
+        const pane = document.getElementById("propertiesPane");
+        pane.innerHTML = "";
+
+        const blacklistedKeys = ['GlobalId', 'expressID', 'type', 'Tag'];
+
+        allKeys.forEach(key => {
+            if (blacklistedKeys.includes(key) && totalSelected > 1) {
+                renderPropRow(pane, key, "<em>Various</em>");
+                return;
+            }
+
+            let commonValue = null;
+            let isFirst = true;
+            let isDifferent = false;
+
+            for (const obj of sampleData) {
+                if (!(key in obj)) { isDifferent = true; break; }
+                let val = obj[key];
+                let currentVal = (val && typeof val === 'object' && 'value' in val) ? val.value : val;
+                if (typeof currentVal === 'object') continue;
+
+                if (isFirst) { commonValue = currentVal; isFirst = false; }
+                else if (commonValue !== currentVal) { isDifferent = true; break; }
+            }
+
+            if (!isDifferent && totalSelected > sampleSize) {
+                const lastObj = ifc.GetLine(activeModelID, ids[totalSelected-1], true);
+                let lv = lastObj[key];
+                let lastVal = (lv && typeof lv === 'object' && 'value' in lv) ? lv.value : lv;
+                if (lastVal !== commonValue) isDifferent = true;
+            }
+
+            renderPropRow(pane, key, isDifferent ? "<em>Various</em>" : commonValue);
+        });
+    } catch (e) { log("PROP ERROR: " + e.message); }
+}
+
+function renderPropRow(parent, key, value) {
+    if (value === null || value === undefined) return;
+    const row = document.createElement("div");
+    row.className = "prop-row";
+    row.innerHTML = `<div class="prop-key">${key}</div><div class="prop-val">${value}</div>`;
+    parent.appendChild(row);
+}
+
+/* ===== INTERACTION ===== */
+let startPoint = new THREE.Vector2();
+let isDragging = false;
+const selectionBoxDiv = document.createElement('div');
+selectionBoxDiv.classList.add('selectBox');
+
+canvas.addEventListener('pointerdown', e => { if(e.button === 0) { startPoint.set(e.clientX, e.clientY); isDragging = true; } });
+window.addEventListener('pointermove', e => {
+    if (!isDragging) return;
+    if (!selectionBoxDiv.parentElement) document.body.appendChild(selectionBoxDiv);
+    selectionBoxDiv.style.left = `${Math.min(e.clientX, startPoint.x)}px`;
+    selectionBoxDiv.style.top = `${Math.min(e.clientY, startPoint.y)}px`;
+    selectionBoxDiv.style.width = `${Math.abs(e.clientX - startPoint.x)}px`;
+    selectionBoxDiv.style.height = `${Math.abs(e.clientY - startPoint.y)}px`;
+});
+
+window.addEventListener('pointerup', async e => {
+    if (!isDragging) return;
+    isDragging = false;
+    if (selectionBoxDiv.parentElement) document.body.removeChild(selectionBoxDiv);
+    const rect = canvas.getBoundingClientRect();
+    if (!e.ctrlKey) clearSelection();
+
+    if (startPoint.distanceTo(new THREE.Vector2(e.clientX, e.clientY)) < 7) {
+        const mouse = new THREE.Vector2(((e.clientX-rect.left)/rect.width)*2-1, -((e.clientY-rect.top)/rect.height)*2+1);
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObjects(pickableObjects);
+        if (hits.length > 0) addToSelectionList(hits[0].object);
+    } else {
+        const minX = ((Math.min(startPoint.x, e.clientX) - rect.left) / rect.width) * 2 - 1;
+        const maxX = ((Math.max(startPoint.x, e.clientX) - rect.left) / rect.width) * 2 - 1;
+        const minY = -((Math.max(startPoint.y, e.clientY) - rect.top) / rect.height) * 2 + 1;
+        const maxY = -((Math.min(startPoint.y, e.clientY) - rect.top) / rect.height) * 2 + 1;
+        pickableObjects.forEach(m => {
+            const v = new THREE.Vector3(); m.getWorldPosition(v); v.project(camera);
+            if(v.x >= minX && v.x <= maxX && v.y >= minY && v.y <= maxY) addToSelectionList(m);
+        });
+    }
+    updateSelectionUI();
+    await fetchIFCProperties();
+});
+
+/* ===== IFC ENGINE ===== */
+let ifc, ifcGroup, ifcBBox = new THREE.Box3(), fullSceneBBox = new THREE.Box3();
+
+async function initIFC() {
+    ifc = new WebIFC.IfcAPI();
+    // Tells the WASM assembly binary compiler to search your local root directory
+    ifc.SetWasmPath("./");
+    await ifc.Init();
+    document.getElementById("status").textContent = "✅ Ready. Choose an IFC file.";
+    log("ENGINE: Web Assembly compiler initialized from local directory.");
+}
+
+function processIFC(buffer, fileName) {
+    log(`ENGINE: Opening ${fileName}`);
+    activeModelID = ifc.OpenModel(new Uint8Array(buffer));
+    
+    document.getElementById("qProxy").textContent = ifc.GetLineIDsWithType(activeModelID, WebIFC.IFCBUILDINGELEMENTPROXY).size();
+    document.getElementById("qSlab").textContent = ifc.GetLineIDsWithType(activeModelID, WebIFC.IFCSLAB).size();
+    document.getElementById("qColumn").textContent = ifc.GetLineIDsWithType(activeModelID, WebIFC.IFCCOLUMN).size();
+    document.getElementById("qBeam").textContent = ifc.GetLineIDsWithType(activeModelID, WebIFC.IFCBEAM).size();
+
+    if (ifcGroup) scene.remove(ifcGroup);
+    ifcGroup = new THREE.Group(); scene.add(ifcGroup);
+    ifcBBox = new THREE.Box3(); pickableObjects = [];
+
+    ifc.StreamAllMeshes(activeModelID, flat => {
+        const pg = flat.geometries;
+        for (let i = 0; i < pg.size(); i++) {
+            const p = pg.get(i);
+            const g = ifc.GetGeometry(activeModelID, p.geometryExpressID);
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute("position", new THREE.InterleavedBufferAttribute(new THREE.InterleavedBuffer(ifc.GetVertexArray(g.GetVertexData(), g.GetVertexDataSize()), 6), 3, 0));
+            geom.setIndex(new THREE.BufferAttribute(ifc.GetIndexArray(g.GetIndexData(), g.GetIndexDataSize()), 1));
+            const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+                color: new THREE.Color(p.color.x, p.color.y, p.color.z),
+                transparent: p.color.w < 1, opacity: p.color.w, side: THREE.DoubleSide
+            }));
+            mesh.matrix.fromArray(p.flatTransformation); mesh.matrixAutoUpdate = false;
+            mesh.userData.expressID = flat.expressID;
+            ifcGroup.add(mesh); pickableObjects.push(mesh);
+            ifcBBox.expandByObject(mesh);
+        }
+    });
+
+    applyViewbox(ifcBBox, "Auto-Load");
+    fullSceneBBox = new THREE.Box3().setFromObject(scene);
+    document.getElementById("status").textContent = `✅ Loaded: ${fileName}`;
+}
+
+function applyViewbox(box, label) {
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const cameraZ = Math.abs(maxDim / 2 / Math.tan(camera.fov * (Math.PI / 180) / 2)) * 1.5; 
+    camera.position.set(center.x + cameraZ, center.y + cameraZ, center.z + cameraZ);
+    controls.target.copy(center);
+    controls.update();
+    log(`VIEW: Zoomed to ${label}`);
+}
+
+document.getElementById("file").onchange = async e => {
+    processIFC(await e.target.files[0].arrayBuffer(), e.target.files[0].name);
+};
+document.getElementById("vp0").onclick = () => { camera.position.set(100,100,100); controls.target.set(0,0,0); controls.update(); };
+document.getElementById("vp1").onclick = () => applyViewbox(fullSceneBBox, "Extents");
+document.getElementById("vp2").onclick = () => applyViewbox(ifcBBox, "IFC");
+
+initIFC();
+</script>
+</body>
+</html>
