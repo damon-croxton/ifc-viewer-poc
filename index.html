@@ -124,7 +124,9 @@ const highlightColor = new THREE.Color(0x3399ff);
 let activeModelID = -1;
 
 function clearSelection() {
-    selectedItems.forEach(item => item.mesh.material.color.copy(item.originalColor));
+    selectedItems.forEach(item => {
+        item.mesh.material.color.copy(item.originalColor);
+    });
     selectedItems.clear();
     updateSelectionUI();
     fetchIFCProperties();
@@ -135,6 +137,9 @@ function hideSelected() {
     log(`VIS: Hiding ${selectedItems.size} items.`);
     selectedItems.forEach(item => {
         item.mesh.visible = false;
+        if (item.mesh.userData.edges) {
+            item.mesh.userData.edges.visible = false;
+        }
         item.mesh.material.color.copy(item.originalColor);
     });
     selectedItems.clear();
@@ -144,7 +149,12 @@ function hideSelected() {
 
 function showAll() {
     log("VIS: Showing all items.");
-    pickableObjects.forEach(m => m.visible = true);
+    pickableObjects.forEach(m => {
+        m.visible = true;
+        if (m.userData.edges) {
+            m.userData.edges.visible = true;
+        }
+    });
 }
 
 function addToSelectionList(mesh) {
@@ -339,13 +349,29 @@ function processIFC(buffer, fileName) {
             const geom = new THREE.BufferGeometry();
             geom.setAttribute("position", new THREE.InterleavedBufferAttribute(new THREE.InterleavedBuffer(ifc.GetVertexArray(g.GetVertexData(), g.GetVertexDataSize()), 6), 3, 0));
             geom.setIndex(new THREE.BufferAttribute(ifc.GetIndexArray(g.GetIndexData(), g.GetIndexDataSize()), 1));
+            
+            // Core mesh setup
             const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
                 color: new THREE.Color(p.color.x, p.color.y, p.color.z),
                 transparent: p.color.w < 1, opacity: p.color.w, side: THREE.DoubleSide
             }));
             mesh.matrix.fromArray(p.flatTransformation); mesh.matrixAutoUpdate = false;
             mesh.userData.expressID = flat.expressID;
-            ifcGroup.add(mesh); pickableObjects.push(mesh);
+            
+            // --- EDGE OUTLINES (ITEM 1) ---
+            const edgesGeo = new THREE.EdgesGeometry(geom, 1); // 1 degree threshold for crisp angles
+            const edgesMat = new THREE.LineBasicMaterial({ color: 0x333333, linewidth: 1 });
+            const edgeLines = new THREE.LineSegments(edgesGeo, edgesMat);
+            edgeLines.matrix.copy(mesh.matrix);
+            edgeLines.matrixAutoUpdate = false;
+            
+            // Associate them so hiding/clearing is kept in sync
+            mesh.userData.edges = edgeLines;
+            
+            ifcGroup.add(mesh);
+            ifcGroup.add(edgeLines);
+            
+            pickableObjects.push(mesh);
             ifcBBox.expandByObject(mesh);
         }
     });
